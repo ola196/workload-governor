@@ -56,12 +56,60 @@ resource "aws_cloudwatch_dashboard" "service_dashboard" {
   dashboard_body = jsonencode({
     widgets = [
       {
-        type = "text",
-        x = 0,
-        y = 0,
-        width = 24,
-        height = 1,
+        type       = "text"
+        x          = 0
+        y          = 0
+        width      = 24
+        height     = 1
         properties = { markdown = "# ${var.service_name} overview" }
+      },
+      # ── Monthly uptime — backend ────────────────────────────────────────
+      # HealthCheckPercentageHealthy averaged over a 30-day window gives the
+      # monthly availability percentage (100 % = fully up all month).
+      {
+        type   = "metric"
+        x      = 0
+        y      = 1
+        width  = 12
+        height = 6
+        properties = {
+          title   = "Backend monthly uptime %"
+          region  = "us-east-1"
+          view    = "timeSeries"
+          stat    = "Average"
+          period  = 2592000 # 30 days in seconds
+          metrics = [
+            ["AWS/Route53", "HealthCheckPercentageHealthy",
+              "HealthCheckId", aws_route53_health_check.backend.id]
+          ]
+          yAxis = { left = { min = 0, max = 100 } }
+          annotations = {
+            horizontal = [{ value = 99.5, label = "SLA 99.5%", color = "#ff6961" }]
+          }
+        }
+      },
+      # ── Monthly uptime — frontend ───────────────────────────────────────
+      {
+        type   = "metric"
+        x      = 12
+        y      = 1
+        width  = 12
+        height = 6
+        properties = {
+          title   = "Frontend monthly uptime %"
+          region  = "us-east-1"
+          view    = "timeSeries"
+          stat    = "Average"
+          period  = 2592000
+          metrics = [
+            ["AWS/Route53", "HealthCheckPercentageHealthy",
+              "HealthCheckId", aws_route53_health_check.frontend.id]
+          ]
+          yAxis = { left = { min = 0, max = 100 } }
+          annotations = {
+            horizontal = [{ value = 99.5, label = "SLA 99.5%", color = "#ff6961" }]
+          }
+        }
       }
     ]
   })
