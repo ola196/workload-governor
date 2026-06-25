@@ -21,6 +21,23 @@
  *     contributor: string   // contributor address (full, optional)
  *   }
  */
+/** Truncates a Stellar address to GABC...WXYZ format. */
+function truncateAddress(address) {
+  if (!address || address.length <= 8) return address;
+  return `${address.slice(0, 4)}...${address.slice(-4)}`;
+}
+
+/** Returns HTML for a copyable, truncated wallet address. */
+function walletAddressHTML(address) {
+  if (!address) return '—';
+  const truncated = truncateAddress(address);
+  const esc = address.replace(/"/g, '&quot;');
+  return `<span class="eht-wallet" style="display:inline-flex;align-items:center;gap:.25rem">` +
+    `<span title="${esc}" style="font-family:monospace;cursor:default">${truncated}</span>` +
+    `<button type="button" class="eht-copy-btn" data-address="${esc}" aria-label="Copy address ${esc}" title="Copy address">⧉</button>` +
+    `</span>`;
+}
+
 export class EventHistoryTable {
   /** @param {HTMLElement} container @param {object[]} events */
   constructor(container, events) {
@@ -71,6 +88,18 @@ export class EventHistoryTable {
     // Mobile card list
     const cards = this._buildCards();
     this._container.appendChild(cards);
+
+    // Copy-to-clipboard delegation
+    this._container.addEventListener('click', e => {
+      const btn = e.target.closest('.eht-copy-btn');
+      if (!btn) return;
+      e.stopPropagation();
+      navigator.clipboard.writeText(btn.dataset.address).then(() => {
+        const orig = btn.textContent;
+        btn.textContent = '✓';
+        setTimeout(() => { btn.textContent = orig; }, 1500);
+      });
+    });
   }
 
   _sortIndicator(col) {
@@ -158,8 +187,8 @@ export class EventHistoryTable {
     return `
       <dl class="eht-dl">
         <dt>Ledger hash</dt><dd>${ev.ledgerHash ?? '—'}</dd>
-        <dt>Actor</dt><dd>${ev.actor ?? '—'}</dd>
-        ${ev.contributor ? `<dt>Contributor</dt><dd>${ev.contributor}</dd>` : ''}
+        <dt>Actor</dt><dd>${walletAddressHTML(ev.actor)}</dd>
+        ${ev.contributor ? `<dt>Contributor</dt><dd>${walletAddressHTML(ev.contributor)}</dd>` : ''}
         <dt>Org</dt><dd>${ev.org ?? '—'}</dd>
         <dt>Issue</dt><dd>${ev.issue ?? '—'}</dd>
       </dl>`;
@@ -188,6 +217,7 @@ export class EventHistoryTable {
 .eht-dl { margin:0; display:grid; grid-template-columns:max-content 1fr; gap:.25rem .75rem; }
 .eht-dl dt { font-weight:600; color:#555; }
 .eht-dl dd { margin:0; word-break:break-all; }
+.eht-copy-btn { background:none; border:none; cursor:pointer; padding:0 2px; line-height:1; color:inherit; font-size:.9em; }
 .eht-cards { display:none; list-style:none; margin:0; padding:0; }
 .eht-card { border:1px solid #ddd; border-radius:6px; padding:.75rem; margin-bottom:.5rem; cursor:pointer; display:grid; grid-template-columns:1fr 1fr 1fr; gap:.25rem; }
 .eht-card-date { font-size:.8rem; color:#777; grid-column:1/-1; }
