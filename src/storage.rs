@@ -33,6 +33,15 @@ pub const GLOBAL_APP_LIMIT: u32 = 15;
 /// Maximum number of active assignments a contributor may hold per org.
 pub const ORG_ASSIGNMENT_LIMIT: u32 = 4;
 
+/// Default global application cap (used when no emergency override has been stored).
+pub const DEFAULT_GLOBAL_CAP: u32 = GLOBAL_APP_LIMIT;
+
+/// Absolute minimum value for the global cap (inclusive).
+pub const GLOBAL_CAP_MIN: u32 = 0;
+
+/// Absolute maximum value for the global cap (inclusive).
+pub const GLOBAL_CAP_MAX: u32 = 100;
+
 /// TTL threshold/extend-to for the contract instance (persistent) entry.
 /// ~30 days at 5 s/ledger — keeps the contract alive between operator bumps.
 pub const INSTANCE_TTL_LEDGERS: u32 = 518_400;
@@ -309,4 +318,35 @@ pub(crate) fn remove_assignment(
 ) {
     let key = assignment_entry_key(org_id, issue_id, contributor);
     env.storage().persistent().remove(&key);
+}
+
+// ---------------------------------------------------------------------------
+// Persistent storage — Global Cap Override
+// ---------------------------------------------------------------------------
+//
+// Key: `symbol_short!("g_cap")`
+// Value: `u32`
+//
+// Stores the current effective global application cap, which defaults to
+// `DEFAULT_GLOBAL_CAP` when absent.  The `emergency_set_global_cap` function
+// writes to this key; `apply_for_issue` reads it via `get_effective_global_cap`.
+
+fn global_cap_key() -> Symbol {
+    symbol_short!("g_cap")
+}
+
+/// Returns the effective global application cap.
+///
+/// Reads the persisted override; falls back to [`DEFAULT_GLOBAL_CAP`] when no
+/// override has ever been set.
+pub(crate) fn get_effective_global_cap(env: &Env) -> u32 {
+    env.storage()
+        .persistent()
+        .get(&global_cap_key())
+        .unwrap_or(DEFAULT_GLOBAL_CAP)
+}
+
+/// Writes a new global application cap override.
+pub(crate) fn set_global_cap(env: &Env, cap: u32) {
+    env.storage().persistent().set(&global_cap_key(), &cap);
 }

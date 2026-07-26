@@ -57,4 +57,8 @@ pub enum ContractError {
     /// An active assignment already exists for this issue and contributor.
     /// Discriminant: `11`.
     AlreadyAssigned = 11,
+
+    /// The requested cap value is outside the valid `[0, 100]` range.
+    /// Discriminant: `12`.
+    CapOutOfRange = 12,
 }

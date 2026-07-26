@@ -108,3 +108,16 @@ pub(crate) fn emit_assignment_revoked(
     let data = (maintainer.clone(), contributor.clone(), org_id.clone(), issue_id);
     env.events().publish(topics, data);
 }
+
+/// Emitted by `emergency_set_global_cap`.
+///
+/// Distinct from a regular `GlobalCapUpdated` event — subscribers can filter on
+/// the `"emrg_cap"` topic to trigger out-of-band alerting / monitoring.
+///
+/// topics: `(symbol_short!("emrg_cap"), admin)`
+/// data:   `(new_cap,)`
+pub(crate) fn emit_emergency_cap_updated(env: &Env, admin: &Address, new_cap: u32) {
+    let topics = (symbol_short!("emrg_cap"), admin.clone());
+    let data = (new_cap,);
+    env.events().publish(topics, data);
+}

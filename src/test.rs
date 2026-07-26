@@ -1162,3 +1162,155 @@ mod error_cases {
     }
 }
 
+
+// ---------------------------------------------------------------------------
+// EMERGENCY CAP TESTS — emergency_set_global_cap (issue #355)
+// ---------------------------------------------------------------------------
+
+#[test]
+fn unit_emergency_set_global_cap_changes_cap_immediately() {
+    let t = TestEnv::new();
+    let admin = Address::generate(&t.env);
+    let contributor = Address::generate(&t.env);
+    let org = t.org("emrg1");
+
+    t.client.initialize(&admin);
+
+    // Default cap is 15; raise it to 20 via emergency function
+    t.client.emergency_set_global_cap(&admin, &20u32);
+    assert_eq!(t.client.get_global_cap(), 20u32, "cap should be updated to 20");
+
+    // Contributor can now submit 20 applications (not blocked at 15)
+    for i in 0u32..20 {
+        t.client.apply_for_issue(&contributor, &org, &i);
+    }
+    assert_eq!(t.client.get_global_application_count(&contributor), 20);
+}
+
+#[test]
+fn unit_emergency_set_global_cap_emits_event() {
+    use soroban_sdk::testutils::Events;
+
+    let t = TestEnv::new();
+    let admin = Address::generate(&t.env);
+
+    t.client.initialize(&admin);
+    t.client.emergency_set_global_cap(&admin, &25u32);
+
+    let events = t.env.events().all();
+    // Last event should be emrg_cap
+    let (_, topics, _): (_, soroban_sdk::Vec<soroban_sdk::Val>, soroban_sdk::Val) =
+        events.last().unwrap();
+    assert_eq!(topics.len(), 2, "EmergencyCapUpdated should have 2-element topics");
+}
+
+#[test]
+fn unit_emergency_set_global_cap_default_is_15() {
+    let t = TestEnv::new();
+    let admin = Address::generate(&t.env);
+    t.client.initialize(&admin);
+    // Before any emergency override the effective cap equals the hard-coded default
+    assert_eq!(t.client.get_global_cap(), 15u32, "default cap should be 15");
+}
+
+#[test]
+fn unit_emergency_set_global_cap_boundary_zero() {
+    let t = TestEnv::new();
+    let admin = Address::generate(&t.env);
+    t.client.initialize(&admin);
+    // Cap of 0 is valid (blocks all new applications)
+    t.client.emergency_set_global_cap(&admin, &0u32);
+    assert_eq!(t.client.get_global_cap(), 0u32);
+}
+
+#[test]
+fn unit_emergency_set_global_cap_boundary_100() {
+    let t = TestEnv::new();
+    let admin = Address::generate(&t.env);
+    t.client.initialize(&admin);
+    // Cap of 100 is the maximum allowed
+    t.client.emergency_set_global_cap(&admin, &100u32);
+    assert_eq!(t.client.get_global_cap(), 100u32);
+}
+
+#[test]
+#[should_panic]
+fn unit_emergency_set_global_cap_rejects_above_100() {
+    let t = TestEnv::new();
+    let admin = Address::generate(&t.env);
+    t.client.initialize(&admin);
+    t.client.emergency_set_global_cap(&admin, &101u32); // CapOutOfRange
+}
+
+#[test]
+#[should_panic]
+fn unit_emergency_set_global_cap_rejects_not_initialized() {
+    let t = TestEnv::new();
+    let admin = Address::generate(&t.env);
+    t.client.emergency_set_global_cap(&admin, &20u32); // NotInitialized
+}
+
+#[test]
+fn unit_emergency_set_global_cap_non_admin_rejected() {
+    let t = TestEnv::new();
+    let admin = Address::generate(&t.env);
+    t.client.initialize(&admin);
+
+    // After clearing mocks, require_auth for stored admin will fail for an impostor
+    t.env.set_auths(&[]);
+    let impostor = Address::generate(&t.env);
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        t.client.emergency_set_global_cap(&impostor, &20u32);
+    }));
+    assert!(result.is_err(), "non-admin must be rejected");
+}
+
+#[test]
+fn unit_emergency_set_global_cap_restores_default_after_cap_raise() {
+    // Raise to 20, confirm blocked at 20, lower back to 15, confirm blocked at 15
+    let t = TestEnv::new();
+    let admin = Address::generate(&t.env);
+    let contributor = Address::generate(&t.env);
+    let org = t.org("restore");
+
+    t.client.initialize(&admin);
+    t.client.emergency_set_global_cap(&admin, &20u32);
+
+    for i in 0u32..20 {
+        t.client.apply_for_issue(&contributor, &org, &i);
+    }
+    // Now lower the cap back to 15; existing 20 applications are unchanged but
+    // no new applications should succeed
+    t.client.emergency_set_global_cap(&admin, &15u32);
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        t.client.apply_for_issue(&contributor, &org, &99u32);
+    }));
+    assert!(result.is_err(), "cap re-enforcement after lowering");
+}
+
+// Error 12 — `CapOutOfRange` via try_ method
+mod error_cases_12 {
+    use soroban_sdk::{testutils::Address as _, Address, Env, Error, Symbol};
+    use crate::{errors::ContractError, WorkloadGovernor, WorkloadGovernorClient};
+
+    fn setup() -> (WorkloadGovernorClient<'static>, &'static Env) {
+        let env = Env::default();
+        env.mock_all_auths();
+        let id = env.register_contract(None, WorkloadGovernor);
+        let env: &'static Env = std::boxed::Box::leak(std::boxed::Box::new(env));
+        (WorkloadGovernorClient::new(env, &id), env)
+    }
+
+    fn ce(e: ContractError) -> Error {
+        Error::from_contract_error(e as u32)
+    }
+
+    #[test]
+    fn err_12_cap_out_of_range() {
+        let (client, env) = setup();
+        let admin = Address::generate(env);
+        client.initialize(&admin);
+        let result = client.try_emergency_set_global_cap(&admin, &101u32);
+        assert_eq!(result, Err(Ok(ce(ContractError::CapOutOfRange))));
+    }
+}
