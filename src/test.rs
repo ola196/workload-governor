@@ -680,6 +680,262 @@ proptest! {
 }
 
 // ---------------------------------------------------------------------------
+// Property: global_application_count == |active applications| at all times
+//
+// This is the Rust counterpart of tests/unit/prop_global_app_limit.test.ts.
+// It drives the *real* contract client (not a model) so it also exercises
+// storage reads/writes and the Soroban host.
+//
+// Sequence encoding:
+//   Each element is (do_apply: bool, issue_id: 0..19).
+//   `do_apply = true`  → attempt apply_for_issue
+//   `do_apply = false` → attempt withdraw_application
+//
+// The test maintains a shadow `BTreeSet<u32>` of currently-applied IDs and
+// after every step asserts that `get_global_application_count` equals the
+// set's cardinality.  This proves the invariant:
+//
+//     global_application_count ≡ |{i : contributor has applied for issue i
+//                                      and not yet withdrawn}|
+// ---------------------------------------------------------------------------
+
+// Feature: workload-governor, Issue #355-prop: Global count invariant under
+// arbitrary apply/withdraw sequences (real contract, 1000+ cases)
+proptest! {
+    #![proptest_config(proptest::test_runner::Config::with_cases(1_000))]
+    #[test]
+    fn prop_global_count_invariant(
+        actions in proptest::collection::vec(
+            (proptest::bool::ANY, 0u32..20u32),
+            1..60,
+        )
+    ) {
+        let (_, client, admin, _, contributor, org) = fresh_client("gcinv");
+        client.initialize(&admin);
+
+        // Shadow set: IDs currently in the "applied" state
+        let mut applied: std::collections::BTreeSet<u32> =
+            std::collections::BTreeSet::new();
+
+        for (do_apply, issue_id) in &actions {
+            let do_apply = *do_apply;
+            let issue_id = *issue_id;
+
+            if do_apply {
+                // --- apply_for_issue ---
+                if applied.contains(&issue_id) {
+                    // Would be DuplicateApplication — skip; count must not change
+                    let count = client.get_global_application_count(&contributor);
+                    prop_assert_eq!(
+                        count as usize, applied.len(),
+                        "count diverged before dup-apply guard (issue {})", issue_id
+                    );
+                    continue;
+                }
+
+                if applied.len() >= crate::storage::GLOBAL_APP_LIMIT as usize {
+                    // Cap reached — must be rejected; count must stay at cap
+                    let result = std::panic::catch_unwind(
+                        std::panic::AssertUnwindSafe(|| {
+                            client.apply_for_issue(&contributor, &org, &issue_id);
+                        }),
+                    );
+                    prop_assert!(
+                        result.is_err(),
+                        "expected rejection at cap for issue {}", issue_id
+                    );
+                } else {
+                    client.apply_for_issue(&contributor, &org, &issue_id);
+                    applied.insert(issue_id);
+                }
+            } else {
+                // --- withdraw_application ---
+                if !applied.contains(&issue_id) {
+                    // Nothing to withdraw — skip; count must not change
+                    let count = client.get_global_application_count(&contributor);
+                    prop_assert_eq!(
+                        count as usize, applied.len(),
+                        "count diverged before withdraw-not-found guard (issue {})", issue_id
+                    );
+                    continue;
+                }
+                client.withdraw_application(&contributor, &org, &issue_id);
+                applied.remove(&issue_id);
+            }
+
+            // ── Invariant check after every successful operation ──────────
+            let on_chain = client.get_global_application_count(&contributor);
+            prop_assert_eq!(
+                on_chain as usize,
+                applied.len(),
+                "global_application_count ({}) ≠ |active applications| ({}) \
+                 after {:?} issue {}",
+                on_chain, applied.len(),
+                if do_apply { "apply" } else { "withdraw" },
+                issue_id,
+            );
+            prop_assert!(
+                on_chain <= crate::storage::GLOBAL_APP_LIMIT,
+                "count {} exceeded cap {}", on_chain, crate::storage::GLOBAL_APP_LIMIT
+            );
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Property: org_assignment_count == |active assignments| at all times
+//
+// This is the Rust counterpart of tests/unit/prop_org_assign_limit.test.ts.
+// It drives the *real* contract client through the full lifecycle:
+//
+//   apply_for_issue → assign_issue → complete_assignment | revoke_assignment
+//
+// Sequence encoding (5 operation types):
+//   0 → apply_for_issue
+//   1 → withdraw_application
+//   2 → assign_issue   (requires a pending application)
+//   3 → complete_assignment
+//   4 → revoke_assignment
+//
+// The test maintains two shadow sets:
+//   `pending`  – issue IDs with an active application
+//   `assigned` – issue IDs with an active assignment
+//
+// After every successful operation it asserts:
+//
+//     org_assignment_count ≡ |{i : contributor is actively assigned to issue i}|
+// ---------------------------------------------------------------------------
+
+// Feature: workload-governor, Issue #355-prop: Org assignment count invariant
+// under arbitrary apply/withdraw/assign/complete/revoke sequences (1000+ cases)
+proptest! {
+    #![proptest_config(proptest::test_runner::Config::with_cases(1_000))]
+    #[test]
+    fn prop_org_count_invariant(
+        actions in proptest::collection::vec(
+            (0u8..5u8, 0u32..10u32), // op_kind 0..4, issue_id 0..9
+            1..60,
+        )
+    ) {
+        let (_, client, admin, maintainer, contributor, org) = fresh_client("ocinv");
+        client.initialize(&admin);
+        client.register_maintainer(&admin, &maintainer, &org);
+
+        // Shadow sets
+        let mut pending:  std::collections::BTreeSet<u32> =
+            std::collections::BTreeSet::new();
+        let mut assigned: std::collections::BTreeSet<u32> =
+            std::collections::BTreeSet::new();
+
+        for (op_kind, issue_id) in &actions {
+            let op_kind  = *op_kind;
+            let issue_id = *issue_id;
+
+            match op_kind {
+                // 0 — apply_for_issue
+                0 => {
+                    if pending.contains(&issue_id) || assigned.contains(&issue_id) {
+                        continue; // DuplicateApplication — skip
+                    }
+                    let global_pending =
+                        client.get_global_application_count(&contributor);
+                    if global_pending >= crate::storage::GLOBAL_APP_LIMIT {
+                        continue; // GlobalApplicationLimitReached — skip
+                    }
+                    client.apply_for_issue(&contributor, &org, &issue_id);
+                    pending.insert(issue_id);
+                }
+
+                // 1 — withdraw_application
+                1 => {
+                    if !pending.contains(&issue_id) {
+                        continue; // ApplicationNotFound — skip
+                    }
+                    client.withdraw_application(&contributor, &org, &issue_id);
+                    pending.remove(&issue_id);
+                }
+
+                // 2 — assign_issue
+                2 => {
+                    if !pending.contains(&issue_id) {
+                        continue; // ApplicationNotFound — skip
+                    }
+                    if assigned.len() >= crate::storage::ORG_ASSIGNMENT_LIMIT as usize {
+                        // Cap reached — must be rejected
+                        let result = std::panic::catch_unwind(
+                            std::panic::AssertUnwindSafe(|| {
+                                client.assign_issue(
+                                    &maintainer, &contributor, &org, &issue_id,
+                                );
+                            }),
+                        );
+                        prop_assert!(
+                            result.is_err(),
+                            "expected rejection at org cap for issue {}", issue_id
+                        );
+                        continue;
+                    }
+                    if assigned.contains(&issue_id) {
+                        continue; // AlreadyAssigned — skip
+                    }
+                    client.assign_issue(&maintainer, &contributor, &org, &issue_id);
+                    pending.remove(&issue_id);
+                    assigned.insert(issue_id);
+                }
+
+                // 3 — complete_assignment
+                3 => {
+                    if !assigned.contains(&issue_id) {
+                        continue; // AssignmentNotFound — skip
+                    }
+                    client.complete_assignment(
+                        &maintainer, &contributor, &org, &issue_id,
+                    );
+                    assigned.remove(&issue_id);
+                }
+
+                // 4 — revoke_assignment
+                _ => {
+                    if !assigned.contains(&issue_id) {
+                        continue; // AssignmentNotFound — skip
+                    }
+                    client.revoke_assignment(
+                        &maintainer, &contributor, &org, &issue_id,
+                    );
+                    assigned.remove(&issue_id);
+                }
+            }
+
+            // ── Invariant check after every successful operation ──────────
+            let on_chain = client.get_org_assignment_count(&contributor, &org);
+            prop_assert_eq!(
+                on_chain as usize,
+                assigned.len(),
+                "org_assignment_count ({}) ≠ |active assignments| ({}) \
+                 after op_kind={} issue {}",
+                on_chain, assigned.len(), op_kind, issue_id,
+            );
+            prop_assert!(
+                on_chain <= crate::storage::ORG_ASSIGNMENT_LIMIT,
+                "org count {} exceeded cap {}",
+                on_chain, crate::storage::ORG_ASSIGNMENT_LIMIT
+            );
+
+            // Bonus: the pending shadow set must stay consistent too
+            let on_chain_global =
+                client.get_global_application_count(&contributor);
+            prop_assert_eq!(
+                on_chain_global as usize,
+                pending.len(),
+                "global_application_count ({}) ≠ |pending apps| ({}) \
+                 after op_kind={} issue {}",
+                on_chain_global, pending.len(), op_kind, issue_id,
+            );
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
 // UPGRADE STATE-PRESERVATION TESTS
 // ---------------------------------------------------------------------------
 //
